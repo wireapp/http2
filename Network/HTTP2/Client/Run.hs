@@ -24,9 +24,11 @@ run ClientConfig{..} conf@Config{..} client = do
     clientInfo <- newClientInfo scheme authority cacheLimit
     ctx <- newContext clientInfo
     mgr <- start confTimeoutManager
+    -- send connection preface before starting sender frame, to prevent a race
+    -- condition that might cause the preface to be sent after other frames
+    exchangeSettings conf ctx
     tid0 <- forkIO $ frameReceiver ctx confReadN
     tid1 <- forkIO $ frameSender ctx conf mgr
-    exchangeSettings conf ctx
     client (sendRequest ctx scheme authority) `E.finally` do
         stop mgr
         killThread tid0
