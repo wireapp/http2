@@ -187,7 +187,7 @@ processState (Open (NoBody tbl@(_,reqvt))) ctx@Context{..} strm@Stream{streamInp
     if isServer ctx then
         atomically $ writeTQueue (inputQ roleInfo) $ Input strm inpObj
       else
-        putMVar streamInput inpObj
+        putMVar streamInput (Just inpObj)
     return False
 processState (Open (HasBody tbl@(_,reqvt))) ctx@Context{..} strm@Stream{streamInput} streamId = do
     let mcl = fst <$> (getHeaderValue tokenContentLength reqvt >>= C8.readInt)
@@ -200,7 +200,7 @@ processState (Open (HasBody tbl@(_,reqvt))) ctx@Context{..} strm@Stream{streamIn
     if isServer ctx then
         atomically $ writeTQueue (inputQ roleInfo) $ Input strm inpObj
       else
-        putMVar streamInput inpObj
+        putMVar streamInput (Just inpObj)
     return False
 processState s@(Open Continued{}) ctx strm _streamId = do
     setStreamState ctx strm s

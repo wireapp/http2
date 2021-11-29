@@ -25,8 +25,6 @@ run ClientConfig{..} conf@Config{..} client = do
     ctx <- newContext clientInfo
     mgr <- start confTimeoutManager
     tid0 <- forkIO $ frameReceiver ctx confReadN
-    -- fixme: if frameSender is terminated but the main thread is alive,
-    --        what will happen?
     tid1 <- forkIO $ frameSender ctx conf mgr
     exchangeSettings conf ctx
     client (sendRequest ctx scheme authority) `E.finally` do
@@ -51,8 +49,10 @@ sendRequest ctx@Context{..} scheme auth (Request req) processResponse = do
           enqueueOutput outputQ $ Output newstrm req' OObj Nothing (return ())
           return newstrm
       Just strm0 -> return strm0
-    rsp <- takeMVar $ streamInput strm
-    processResponse $ Response rsp
+    mrsp <- takeMVar $ streamInput strm
+    case mrsp of
+      Just rsp -> processResponse $ Response rsp
+      Nothing -> E.throwIO (ConnectionError ProtocolError "connection terminated by server")
 
 exchangeSettings :: Config -> Context -> IO ()
 exchangeSettings Config{..} Context{..} = do

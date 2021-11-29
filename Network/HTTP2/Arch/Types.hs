@@ -147,7 +147,7 @@ data Stream = Stream {
     streamNumber     :: StreamId
   , streamState      :: IORef StreamState
   , streamWindow     :: TVar WindowSize
-  , streamInput      :: MVar InpObj -- Client only
+  , streamInput      :: MVar (Maybe InpObj) -- Client only
   }
 
 instance Show Stream where

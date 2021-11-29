@@ -11,10 +11,12 @@ module Network.HTTP2.Arch.Sender (
   ) where
 
 import Control.Concurrent.STM
+import Control.Concurrent.MVar
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
 import Data.ByteString.Builder (Builder)
 import qualified Data.ByteString.Builder.Extra as B
+import Data.IORef
 import Foreign.Ptr (plusPtr)
 import Network.ByteOrder
 
@@ -60,7 +62,7 @@ data Switch = C Control
             | Flush
 
 frameSender :: Context -> Config -> Manager -> IO ()
-frameSender ctx@Context{outputQ,controlQ,connectionWindow,encodeDynamicTable}
+frameSender ctx@Context{outputQ,controlQ,connectionWindow,encodeDynamicTable,streamTable}
             Config{..}
             mgr = loop 0 `E.catch` ignore
   where
@@ -82,17 +84,22 @@ frameSender ctx@Context{outputQ,controlQ,connectionWindow,encodeDynamicTable}
     loop off = do
         x <- atomically $ dequeue off
         case x of
-            C ctl -> do
+            C ctl | off >= 0 -> do
                 when (off /= 0) $ flushN off
                 off' <- control ctl off
                 when (off' >= 0) $ loop off'
-            O out -> do
+                when (off' < 0 && isClient ctx) $ do
+                  notifyListeners streamTable
+                  loop off'
+            O out | off >= 0 -> do
                 off' <- outputOrEnqueueAgain out off
                 case off' of
                     0                    -> loop 0
                     _ | off' > hardLimit -> flushN off' >> loop 0
                       | otherwise        -> loop off'
-            Flush -> flushN off >> loop 0
+            O (Output str _ _ _ _) | off < 0 -> notifyListener str
+            Flush | off >= 0 -> flushN off >> loop 0
+            _ -> loop off
 
     control CFinish         _ = return (-1)
     control (CGoaway frame) _ = confSendAll frame >> return (-1)
@@ -306,6 +313,15 @@ frameSender ctx@Context{outputQ,controlQ,connectionWindow,encodeDynamicTable}
     {-# INLINE ignore #-}
     ignore :: E.SomeException -> IO ()
     ignore _ = return ()
+
+    notifyListeners :: StreamTable -> IO ()
+    notifyListeners (StreamTable ref) = do
+      table <- readIORef ref
+      traverse_ notifyListener table
+
+    notifyListener :: Stream -> IO ()
+    notifyListener str = putMVar (streamInput str) Nothing
+
 
 -- | Running trailers-maker.
 --
