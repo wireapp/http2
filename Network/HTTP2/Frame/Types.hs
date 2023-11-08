@@ -234,7 +234,7 @@ isWindowOverflow w = testBit w 31
 -- >>> recommendedConcurrency
 -- 100
 recommendedConcurrency :: Int
-recommendedConcurrency = 100
+recommendedConcurrency = 3
 
 ----------------------------------------------------------------
 
