@@ -75,6 +75,7 @@ updatePeerSettings Context{peerSettings, oddStreamTable, evenStreamTable} peerAl
     -- 2) newOddStream reads new peerSettings and
     --    insert it to its stream table before adjusting.
     let dif = newws - oldws
+    putStrLn $ "\n new windpw size: " <> show dif
     when (dif /= 0) $ do
         getOddStreams oddStreamTable >>= updateAllStreamTxFlow dif
         getEvenStreams evenStreamTable >>= updateAllStreamTxFlow dif
