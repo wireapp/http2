@@ -113,6 +113,7 @@ setup ServerConfig{..} conf@Config{..} = do
 
 runH2 :: Config -> Context -> Manager -> IO ()
 runH2 conf ctx mgr = do
+    putStrLn "running h2 server"
     let runReceiver = frameReceiver ctx conf
         runSender = frameSender ctx conf mgr
         runBackgroundThreads = concurrently_ runReceiver runSender

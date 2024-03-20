@@ -38,10 +38,11 @@ waitConnectionWindowSize Context{txFlow} = do
 
 increaseWindowSize :: StreamId -> TVar TxFlow -> WindowSize -> IO ()
 increaseWindowSize sid tvar n = do
+    oldW <- txWindowSize <$> readTVarIO tvar
     atomically $ modifyTVar' tvar $ \flow -> flow{txfLimit = txfLimit flow + n}
     w <- txWindowSize <$> readTVarIO tvar
     when (isWindowOverflow w) $ do
-        let msg = fromString ("window update for stream " ++ show sid ++ " is overflow")
+        let msg = fromString ("window update for stream " ++ show sid ++ " is overflow. New window size: " <> show w <> ", from previous size: " <> show oldW)
             err =
                 if isControl sid
                     then ConnectionErrorIsSent
@@ -69,13 +70,15 @@ decreaseWindowSize Context{txFlow} Stream{streamTxFlow} siz = do
 informWindowUpdate :: Context -> Stream -> Int -> IO ()
 informWindowUpdate _ _ 0 = return ()
 informWindowUpdate Context{controlQ, rxFlow} Stream{streamNumber, streamRxFlow} len = do
-    mxc <- atomicModifyIORef rxFlow $ maybeOpenRxWindow len FCTWindowUpdate
+    mxc <- atomicModifyIORef' rxFlow $ maybeOpenRxWindow len FCTWindowUpdate
     forM_ mxc $ \ws -> do
+        putStrLn $ "\n ------------ new window size for rx: " <> show (ws `div` 1024)
         let frame = windowUpdateFrame 0 ws
             cframe = CFrames Nothing [frame]
         enqueueControl controlQ cframe
-    mxs <- atomicModifyIORef streamRxFlow $ maybeOpenRxWindow len FCTWindowUpdate
+    mxs <- atomicModifyIORef' streamRxFlow $ maybeOpenRxWindow len FCTWindowUpdate
     forM_ mxs $ \ws -> do
+        putStrLn $ "\n ------------ new window size for stream rx: " <> show (ws `div` 1024)
         let frame = windowUpdateFrame streamNumber ws
             cframe = CFrames Nothing [frame]
         enqueueControl controlQ cframe

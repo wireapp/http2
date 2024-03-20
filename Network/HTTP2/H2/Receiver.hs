@@ -541,6 +541,7 @@ stream FrameContinuation FrameHeader{flags, streamId} frag ctx s@(Open hcl (Cont
 -- (No state transition)
 stream FrameWindowUpdate header bs _ s strm = do
     WindowUpdateFrame n <- guardIt $ decodeWindowUpdateFrame header bs
+    putStrLn $ "\n --------- updating window frame to size: " <> show n <> "\n\t -- with: " <> show bs
     increaseStreamWindowSize strm n
     return s
 

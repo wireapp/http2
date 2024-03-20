@@ -131,7 +131,8 @@ setup ClientConfig{..} conf@Config{..} = do
     return (ctx, mgr)
 
 runH2 :: Config -> Context -> Manager -> IO a -> IO a
-runH2 conf ctx mgr runClient =
+runH2 conf ctx mgr runClient = do
+    putStrLn "running h2 client"
     stopAfter mgr (race runBackgroundThreads runClient) $ \res -> do
         closeAllStreams (oddStreamTable ctx) (evenStreamTable ctx) $
             either Just (const Nothing) res
