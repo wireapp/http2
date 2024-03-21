@@ -50,12 +50,12 @@ increaseWindowSize sid tvar n = do
         E.throwIO $ err FlowControlError sid msg
 
 increaseStreamWindowSize :: Stream -> WindowSize -> IO ()
-increaseStreamWindowSize Stream{streamNumber, streamTxFlow} n =
-    increaseWindowSize streamNumber streamTxFlow n
+increaseStreamWindowSize Stream{streamNumber, streamTxFlow} =
+    increaseWindowSize streamNumber streamTxFlow
 
 increaseConnectionWindowSize :: Context -> Int -> IO ()
-increaseConnectionWindowSize Context{txFlow} n =
-    increaseWindowSize 0 txFlow n
+increaseConnectionWindowSize Context{txFlow} =
+    increaseWindowSize 0 txFlow
 
 decreaseWindowSize :: Context -> Stream -> WindowSize -> IO ()
 decreaseWindowSize Context{txFlow} Stream{streamTxFlow} siz = do
@@ -72,13 +72,13 @@ informWindowUpdate _ _ 0 = return ()
 informWindowUpdate Context{controlQ, rxFlow} Stream{streamNumber, streamRxFlow} len = do
     mxc <- atomicModifyIORef' rxFlow $ maybeOpenRxWindow len FCTWindowUpdate
     forM_ mxc $ \ws -> do
-        putStrLn $ "\n ------------ new window size for rx: " <> show (ws `div` 1024)
+        putStrLn $ "\n ------------ new window size for rx: " <> show ws
         let frame = windowUpdateFrame 0 ws
             cframe = CFrames Nothing [frame]
         enqueueControl controlQ cframe
     mxs <- atomicModifyIORef' streamRxFlow $ maybeOpenRxWindow len FCTWindowUpdate
     forM_ mxs $ \ws -> do
-        putStrLn $ "\n ------------ new window size for stream rx: " <> show (ws `div` 1024)
+        putStrLn $ "\n ------------ new window size for stream rx: " <> show ws
         let frame = windowUpdateFrame streamNumber ws
             cframe = CFrames Nothing [frame]
         enqueueControl controlQ cframe

@@ -340,6 +340,7 @@ control FrameGoAway header bs _ = do
         else E.throwIO $ ConnectionErrorIsReceived err sid $ Short.toShort msg
 control FrameWindowUpdate header bs ctx = do
     WindowUpdateFrame n <- guardIt $ decodeWindowUpdateFrame header bs
+    putStrLn $ "\n increasing connection size by: " <> show n
     increaseConnectionWindowSize ctx n
 control _ _ _ _ =
     -- must not reach here
