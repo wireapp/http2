@@ -1,28 +1,38 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
+{-# OPTIONS_GHC -Wno-orphans -Wno-incomplete-patterns #-}
 
 module HTTP2.WindowSpec where
 
 -- TODO: instead of consumed, received, don't we want received - consumed?  (to avoid overflows on long-living streams)
 
+-- TODO: do we need to grant further assumptions on the operations args?  like, don't conume more than you've received so far?
+
 import Data.List
-import Data.Maybe
 import Network.Control
 import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
+import Text.Show.Pretty
 
-data Op = Consume Int | Receive Int
+-- types
+
+deriving instance Eq RxFlow
+
+data Op
+  = Consume {consumeArg :: Int, consumeResult :: Maybe Int}
+  | Receive {receiveArg :: Int, receiveResult :: Maybe Bool}
   deriving (Eq, Show)
 
-newtype OpRun = OpRun [Op]
+newtype OpScript = OpScript [Op]
   deriving (Eq, Show)
 
-newtype OpTrace = OpTrace {traceStart :: RxFlow, traceSteps :: [(Op, RxFlow)]}
+data OpTrace = OpTrace {traceStart :: RxFlow, traceSteps :: [(Op, RxFlow)]}
   deriving (Eq, Show)
+
+-- arbitrary instances
 
 instance Arbitrary RxFlow where
   arbitrary = newRxFlow <$> chooseInt (1, 2_000_000)
@@ -30,151 +40,86 @@ instance Arbitrary RxFlow where
 instance Arbitrary Op where
   arbitrary =
     oneof
-      [ Consume <$> chooseInt (0, 2_000_000),
-        Receive <$> chooseInt (0, 2_000_000)
+      [ (`Consume` Nothing) <$> chooseInt (0, 2_000_000),
+        (`Receive` Nothing) <$> chooseInt (0, 2_000_000)
       ]
   shrink = \case
-    Consume i -> Consume <$> shrink i
-    Receive i -> Receive <$> shrink i
+    Consume i r -> (`Consume` r) <$> shrink i
+    Receive i r -> (`Receive` r) <$> shrink i
 
-instance Arbitrary OpRun where
-  arbitrary = OpRun <$> arbitrary
-  shrink (OpRun ops) = OpRun <$> (mconcat (f (inits ops)) :: [[Op]])
+instance Arbitrary OpScript where
+  arbitrary = OpScript <$> arbitrary
+  shrink (OpScript ops) = OpScript <$> (mconcat (f (inits ops)) :: [[Op]])
     where
       -- for every element, shrink every element in it
       f :: [[Op]] -> [[[Op]]]
       f = fmap $ \op -> transpose $ shrink <$> op
 
-opRunToTrace :: OpRun -> IO OpTrace
-opRunToTrace (OpRun steps) = do
-  rxFlow <- generate arbitrary
-  OpTrace rxFlow (go rxFlow steps)
+-- run a script
+
+runOpScript :: RxFlow -> OpScript -> OpTrace
+runOpScript initialFlow (OpScript steps) = OpTrace initialFlow (runManySteps initialFlow steps)
   where
-    go :: RxFlow -> [Op] -> [(Op, RxFlow)] -- TODO: use foldl' to make this nicer.
-    go _ [] = []
-    go old (op : ops) = let new = goStep old op in (op, new) : go new ops
+    runManySteps :: RxFlow -> [Op] -> [(Op, RxFlow)]
+    runManySteps _ [] = []
+    runManySteps oldFlow (op : ops) =
+      let step@(_, newFlow) = runStep oldFlow op
+       in step : runManySteps newFlow ops
 
-    goStep :: RxFlow -> Op -> (Op, RxFlow)
-    goStep = undefined -- interpretOp without the invariants
+    runStep :: RxFlow -> Op -> (Op, RxFlow)
+    runStep oldFlow = \case
+      op@(Consume i Nothing) ->
+        let (newFlow, limitDelta) = maybeOpenRxWindow i FCTWindowUpdate oldFlow
+         in (op {consumeResult = limitDelta}, newFlow)
+      op@(Receive i Nothing) ->
+        let (newFlow, isAcceptable) = checkRxLimit i oldFlow
+         in (op {receiveResult = Just isAcceptable}, newFlow)
 
-----------------------------------------------------------------------
+-- invariants
 
-interpretOpRun :: OpRun -> Assertion
-interpretOpRun oprun = do
-  flow <- generate arbitrary
-  go flow oprun -- TODO: foldM?
+assertOpTrace :: OpTrace -> Assertion
+assertOpTrace (OpTrace initialFlow steps) = assertOpStep initialFlow `mapM_` steps
   where
-    go :: RxFlow -> OpRun -> Assertion
-    go _old (OpRun []) = pure ()
-    go old (OpRun (op : ops)) = interpretOp old op >>= (`go` OpRun ops)
-
-interpretOp :: RxFlow -> Op -> IO RxFlow
-interpretOp rxFlow = \case
-  op@(Consume i) -> do
-    -- TODO: assert the update limit in the invariants
-    let (newFlow, updateLimit) = maybeOpenRxWindow i FCTWindowUpdate rxFlow
-    invariants rxFlow op newFlow updateLimit
-    -- TODO: invariants for updateLimit and isAcceptable
-    pure newFlow
-  op@(Receive i) -> do
-    let (newFlow, isAcceptable) = checkRxLimit i rxFlow
-    if isAcceptable
-      then invariants rxFlow op newFlow Nothing
-      else newFlow `shouldBe` rxFlow
-
-    pure newFlow
-
-invariants :: RxFlow -> Op -> RxFlow -> Maybe Int -> Assertion
-invariants old op new updateLimit = do
-  ("window", rxfWindow old) `shouldBe` ("window", rxfWindow new)
-  ("consumed", rxfConsumed new)
-    `shouldBe` ( "consumed",
-                 case op of
-                   Consume consumed -> rxfConsumed old + consumed
-                   Receive _ -> rxfConsumed old
-               )
-  ("received " <> show op, rxfReceived new)
-    `shouldBe` ( "received " <> show op,
-                 case op of
-                   Consume _ -> rxfReceived old
-                   Receive received -> rxfReceived old + received
-               )
-  ("limit", rxfLimit new)
-    `shouldBe` ( "limit",
-                 case op of
-                   Consume consumed
-                     | rxfLimit old - rxfReceived old < rxfWindow old `div` 2 -> rxfConsumed old + consumed + rxfWindow old
-                     | otherwise -> rxfLimit old
-                   Receive _ -> rxfLimit old
-               )
-  ( if rxfLimit old - rxfReceived old < rxfWindow old `div` 2
-      then updateLimit `shouldSatisfy` isJust
-      else updateLimit `shouldBe` Nothing
-    )
+    assertOpStep :: RxFlow -> (Op, RxFlow) -> Assertion
+    assertOpStep oldFlow (op, newFlow) = do
+      case op of
+        Consume i limitDelta -> do
+          (op, newFlow)
+            `shouldBe` ( op,
+                         RxFlow
+                           { rxfWindow = rxfWindow newFlow,
+                             rxfConsumed = rxfConsumed oldFlow + i,
+                             rxfReceived = rxfReceived oldFlow,
+                             rxfLimit =
+                               if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
+                                 then rxfConsumed oldFlow + i + rxfWindow oldFlow
+                                 else rxfLimit oldFlow
+                           }
+                       )
+          limitDelta
+            `shouldBe` if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2
+              then Just (rxfLimit newFlow - rxfLimit oldFlow)
+              else Nothing
+        Receive i (Just isAcceptable) -> do
+          if isAcceptable
+            then
+              newFlow
+                `shouldBe` RxFlow
+                  { rxfWindow = rxfWindow newFlow,
+                    rxfConsumed = rxfConsumed oldFlow,
+                    rxfReceived = rxfReceived oldFlow + i,
+                    rxfLimit = rxfLimit oldFlow
+                  }
+            else
+              newFlow
+                `shouldBe` oldFlow
 
 spec :: Spec
 spec = do
-  describe "maybeOpenRxWindow" $ do
-    fprop "property!" interpretOpRun
+  fprop "state transition graph checks out" $
+    \(initialFlow, script) -> do
+      let trace = runOpScript initialFlow script
+      counterexample ("trace: " <> ppShow trace) (assertOpTrace trace)
 
-    it "updates window max limit if availability reaches a threshold" $ do
-      let consume = 100
-      let initRxFlow =
-            RxFlow
-              { rxfWindow = 100,
-                rxfConsumed = 0,
-                rxfReceived = 100,
-                rxfLimit = 100
-              }
-          expectedRxFlow =
-            RxFlow
-              { rxfWindow = 100,
-                rxfConsumed = consume,
-                rxfReceived = 100,
-                rxfLimit = 200
-              }
-      let (newFlow, limitUpdate) = maybeOpenRxWindow consume FCTWindowUpdate initRxFlow
-      limitUpdate `shouldBe` Just 100
-      newFlow `shouldBe` expectedRxFlow
-
-    it "does not update max limit if availability does not reach a threshold" $ do
-      let consume = 40
-          received = 50
-      let initRxFlow =
-            RxFlow
-              { rxfWindow = 100,
-                rxfConsumed = 0,
-                rxfReceived = received,
-                rxfLimit = 100
-              }
-          expectedRxFlow =
-            RxFlow
-              { rxfWindow = 100,
-                rxfConsumed = consume,
-                rxfReceived = received,
-                rxfLimit = 100
-              }
-      let (newFlow, limitUpdate) = maybeOpenRxWindow consume FCTWindowUpdate initRxFlow
-      (newFlow, limitUpdate) `shouldBe` (expectedRxFlow, Nothing)
-
-    it "limit goes down?" $ do
-      let consume = 100
-          received = 500
-      let initRxFlow =
-            RxFlow
-              { rxfWindow = 100,
-                rxfConsumed = 350,
-                rxfReceived = received,
-                rxfLimit = 450
-              }
-          expectedRxFlow =
-            RxFlow
-              { rxfWindow = 100,
-                rxfConsumed = 350 + consume,
-                rxfReceived = received,
-                rxfLimit = 100
-              }
-      let (newFlow, limitUpdate) = maybeOpenRxWindow consume FCTWindowUpdate initRxFlow
-      (newFlow, limitUpdate) `shouldBe` (expectedRxFlow, Nothing)
-
-deriving instance Eq RxFlow
+-- Randomized with seed 1637938524
+-- cd ~/src/http2 ; cabal test --test-options='--seed 1637938524'

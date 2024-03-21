@@ -317,7 +317,8 @@ test-suite spec
         random,
         QuickCheck,
         HUnit,
-        typed-process
+        typed-process,
+        pretty-show
 
 test-suite spec2
     type:               exitcode-stdio-1.0
