@@ -5,6 +5,8 @@
 
 module HTTP2.WindowSpec where
 
+-- TODO: instead of consumed, received, don't we want received - consumed?  (to avoid overflows on long-living streams)
+
 import Data.List
 import Data.Maybe
 import Network.Control
@@ -13,10 +15,17 @@ import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
 
--- TODO: instead of consumed, received, don't we want received - consumed?  (to avoid overflows on long-living streams)
---
 data Op = Consume Int | Receive Int
   deriving (Eq, Show)
+
+newtype OpRun = OpRun [Op]
+  deriving (Eq, Show)
+
+newtype OpTrace = OpTrace {traceStart :: RxFlow, traceSteps :: [(Op, RxFlow)]}
+  deriving (Eq, Show)
+
+instance Arbitrary RxFlow where
+  arbitrary = newRxFlow <$> chooseInt (1, 2_000_000)
 
 instance Arbitrary Op where
   arbitrary =
@@ -28,9 +37,6 @@ instance Arbitrary Op where
     Consume i -> Consume <$> shrink i
     Receive i -> Receive <$> shrink i
 
-newtype OpRun = OpRun [Op]
-  deriving (Eq, Show)
-
 instance Arbitrary OpRun where
   arbitrary = OpRun <$> arbitrary
   shrink (OpRun ops) = OpRun <$> (mconcat (f (inits ops)) :: [[Op]])
@@ -39,8 +45,19 @@ instance Arbitrary OpRun where
       f :: [[Op]] -> [[[Op]]]
       f = fmap $ \op -> transpose $ shrink <$> op
 
-instance Arbitrary RxFlow where
-  arbitrary = newRxFlow <$> chooseInt (1, 2_000_000)
+opRunToTrace :: OpRun -> IO OpTrace
+opRunToTrace (OpRun steps) = do
+  rxFlow <- generate arbitrary
+  OpTrace rxFlow (go rxFlow steps)
+  where
+    go :: RxFlow -> [Op] -> [(Op, RxFlow)] -- TODO: use foldl' to make this nicer.
+    go _ [] = []
+    go old (op : ops) = let new = goStep old op in (op, new) : go new ops
+
+    goStep :: RxFlow -> Op -> (Op, RxFlow)
+    goStep = undefined -- interpretOp without the invariants
+
+----------------------------------------------------------------------
 
 interpretOpRun :: OpRun -> Assertion
 interpretOpRun oprun = do
