@@ -1,13 +1,13 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wno-orphans -Wno-incomplete-patterns #-}
 
 module HTTP2.WindowSpec where
 
 -- TODO: instead of consumed, received, don't we want received - consumed?  (to avoid overflows on long-living streams)
-
--- TODO: do we need to grant further assumptions on the operations args?  like, don't conume more than you've received so far?
 
 import Data.List
 import Network.Control
@@ -21,15 +21,16 @@ import Text.Show.Pretty
 
 deriving instance Eq RxFlow
 
-data Op
-  = Consume {consumeArg :: Int, consumeResult :: Maybe Int}
-  | Receive {receiveArg :: Int, receiveResult :: Maybe Bool}
+data Op = Consume | Receive
+  deriving (Eq, Show, Bounded, Enum)
+
+data OpWithResult = ConsumeWithResult (Maybe Int) | ReceiveWithResult Bool
   deriving (Eq, Show)
 
-newtype OpScript = OpScript [Op]
+data Step op = Step {stepOp :: op, stepArg :: Int}
   deriving (Eq, Show)
 
-data OpTrace = OpTrace {traceStart :: RxFlow, traceSteps :: [(Op, RxFlow)]}
+data Trace = Trace {traceStart :: RxFlow, traceSteps :: [(Step OpWithResult, RxFlow)]}
   deriving (Eq, Show)
 
 -- arbitrary instances
@@ -38,88 +39,106 @@ instance Arbitrary RxFlow where
   arbitrary = newRxFlow <$> chooseInt (1, 2_000_000)
 
 instance Arbitrary Op where
-  arbitrary =
-    oneof
-      [ (`Consume` Nothing) <$> chooseInt (0, 2_000_000),
-        (`Receive` Nothing) <$> chooseInt (0, 2_000_000)
-      ]
-  shrink = \case
-    Consume i r -> (`Consume` r) <$> shrink i
-    Receive i r -> (`Receive` r) <$> shrink i
+  arbitrary = elements [minBound ..]
 
-instance Arbitrary OpScript where
-  arbitrary = OpScript <$> arbitrary
-  shrink (OpScript ops) = OpScript <$> (mconcat (f (inits ops)) :: [[Op]])
+instance Arbitrary Trace where
+  arbitrary = do
+    initialFlow <- arbitrary
+    len <- chooseInt (0, 5) -- TODO: what about longer traces?
+    Trace initialFlow <$> runManySteps len initialFlow
     where
-      -- for every element, shrink every element in it
-      f :: [[Op]] -> [[[Op]]]
-      f = fmap $ \op -> transpose $ shrink <$> op
+      runManySteps :: Int -> RxFlow -> Gen [(Step OpWithResult, RxFlow)]
+      runManySteps 0 _ = pure []
+      runManySteps len oldFlow = do
+        step@(_, newFlow) <- runStep oldFlow <$> genStep oldFlow
+        (step :) <$> runManySteps (len - 1) newFlow
 
--- run a script
+      -- TODO: extend genStep: what happens if we consume or receive 0 or negative numbers?
+      -- what if frame size > window size?
+      genStep :: RxFlow -> Gen (Step Op)
+      genStep oldFlow = oneof [mkConsume, mkReceive]
+        where
+          mkReceive =
+            Step Receive <$> chooseInt (1, rxfWindow oldFlow)
 
-runOpScript :: RxFlow -> OpScript -> OpTrace
-runOpScript initialFlow (OpScript steps) = OpTrace initialFlow (runManySteps initialFlow steps)
-  where
-    runManySteps :: RxFlow -> [Op] -> [(Op, RxFlow)]
-    runManySteps _ [] = []
-    runManySteps oldFlow (op : ops) =
-      let step@(_, newFlow) = runStep oldFlow op
-       in step : runManySteps newFlow ops
+          mkConsume =
+            let recv = rxfReceived oldFlow
+             in if recv > 0
+                  then Step Consume <$> chooseInt (1, rxfReceived oldFlow)
+                  else mkReceive
 
-    runStep :: RxFlow -> Op -> (Op, RxFlow)
-    runStep oldFlow = \case
-      op@(Consume i Nothing) ->
-        let (newFlow, limitDelta) = maybeOpenRxWindow i FCTWindowUpdate oldFlow
-         in (op {consumeResult = limitDelta}, newFlow)
-      op@(Receive i Nothing) ->
-        let (newFlow, isAcceptable) = checkRxLimit i oldFlow
-         in (op {receiveResult = Just isAcceptable}, newFlow)
+      runStep :: RxFlow -> Step Op -> (Step OpWithResult, RxFlow)
+      runStep oldFlow = \case
+        Step Consume arg ->
+          let (newFlow, limitDelta) = maybeOpenRxWindow arg FCTWindowUpdate oldFlow
+           in (Step (ConsumeWithResult limitDelta) arg, newFlow)
+        Step Receive arg ->
+          let (newFlow, isAcceptable) = checkRxLimit arg oldFlow
+           in (Step (ReceiveWithResult isAcceptable) arg, newFlow)
+
+  shrink trace@(Trace initialFlow steps) =
+    {-
+       -- in an earlier version of this test we did this in order to also shrink the frame sizes:
+       instance Arbitrary OpScript where
+         arbitrary = OpScript <$> arbitrary
+         shrink (OpScript ops) = OpScript <$> (mconcat (f (inits ops)) :: [[Op]])
+           where
+             -- for every element, shrink every element in it
+             f :: [[Op]] -> [[[Op]]]
+             f = fmap $ \op -> transpose $ shrink <$> op
+
+       data OpScript = OpScript [Op]
+
+       -- instead, we look at the last step and all prefixes of a failing sample.
+    -}
+    trunc trace : (Trace initialFlow <$> init (inits steps))
+    where
+      trunc :: Trace -> Trace
+      trunc keep@(Trace _ stp) = case reverse stp of
+        [] -> keep
+        [_] -> keep
+        ((lastStep, lastFlow) : (_, initFlow) : _) -> Trace initFlow [(lastStep, lastFlow)]
 
 -- invariants
 
-assertOpTrace :: OpTrace -> Assertion
-assertOpTrace (OpTrace initialFlow steps) = assertOpStep initialFlow `mapM_` steps
+-- TODO: make it obvious which RxFlow (in which step) is violating an expectation.  something with an index, maybe?
+-- TODO: use ppShow and counterexample again.  doesn't matter if it's redundant.
+
+assertTrace :: Trace -> Assertion
+assertTrace (Trace initialFlow steps) = assertStep initialFlow `mapM_` steps
   where
-    assertOpStep :: RxFlow -> (Op, RxFlow) -> Assertion
-    assertOpStep oldFlow (op, newFlow) = do
-      case op of
-        Consume i limitDelta -> do
-          (op, newFlow)
-            `shouldBe` ( op,
-                         RxFlow
-                           { rxfWindow = rxfWindow newFlow,
-                             rxfConsumed = rxfConsumed oldFlow + i,
-                             rxfReceived = rxfReceived oldFlow,
-                             rxfLimit =
-                               if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
-                                 then rxfConsumed oldFlow + i + rxfWindow oldFlow
-                                 else rxfLimit oldFlow
-                           }
-                       )
+    assertStep :: RxFlow -> (Step OpWithResult, RxFlow) -> Assertion
+    assertStep oldFlow (step, newFlow) = do
+      case step of
+        Step (ConsumeWithResult limitDelta) arg -> do
+          newFlow
+            `shouldBe` RxFlow
+              { rxfWindow = rxfWindow newFlow,
+                rxfConsumed = rxfConsumed oldFlow + arg,
+                rxfReceived = rxfReceived oldFlow,
+                rxfLimit =
+                  if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
+                    then rxfConsumed oldFlow + arg + rxfWindow oldFlow
+                    else rxfLimit oldFlow
+              }
           limitDelta
-            `shouldBe` if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2
+            `shouldBe` if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
               then Just (rxfLimit newFlow - rxfLimit oldFlow)
               else Nothing
-        Receive i (Just isAcceptable) -> do
-          if isAcceptable
-            then
-              newFlow
-                `shouldBe` RxFlow
+        Step (ReceiveWithResult isAcceptable) arg -> do
+          newFlow
+            `shouldBe` if isAcceptable
+              then
+                RxFlow
                   { rxfWindow = rxfWindow newFlow,
                     rxfConsumed = rxfConsumed oldFlow,
-                    rxfReceived = rxfReceived oldFlow + i,
+                    rxfReceived = rxfReceived oldFlow + arg,
                     rxfLimit = rxfLimit oldFlow
                   }
-            else
-              newFlow
-                `shouldBe` oldFlow
+              else oldFlow
 
 spec :: Spec
 spec = do
-  fprop "state transition graph checks out" $
-    \(initialFlow, script) -> do
-      let trace = runOpScript initialFlow script
-      counterexample ("trace: " <> ppShow trace) (assertOpTrace trace)
+  fprop "state transition graph checks out" assertTrace
 
--- Randomized with seed 1637938524
--- cd ~/src/http2 ; cabal test --test-options='--seed 1637938524'
+-- cd ~/src/http2 ; cabal test spec --test-options='--seed 1637938524 -f checks'
