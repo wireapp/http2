@@ -297,6 +297,7 @@ test-suite spec
         HTTP2.ClientSpec
         HTTP2.FrameSpec
         HTTP2.ServerSpec
+        HTTP2.WindowSpec
 
     default-language:   Haskell2010
     default-extensions: Strict StrictData
@@ -312,7 +313,10 @@ test-suite spec
         http2,
         network,
         network-run >=0.1.0,
+        network-control,
         random,
+        QuickCheck,
+        HUnit,
         typed-process
 
 test-suite spec2
@@ -331,7 +335,8 @@ test-suite spec2
         http-types,
         http2,
         network-run >=0.1.0,
-        typed-process
+        typed-process,
+        network-control
 
     if flag(h2spec)
 
@@ -389,6 +394,9 @@ test-suite frame
         hspec >=1.3,
         http2,
         network-byte-order,
+        QuickCheck,
+        HUnit,
+        network-control,
         text,
         unordered-containers
 

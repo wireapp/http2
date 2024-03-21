@@ -42,7 +42,7 @@ increaseWindowSize sid tvar n = do
     atomically $ modifyTVar' tvar $ \flow -> flow{txfLimit = txfLimit flow + n}
     w <- txWindowSize <$> readTVarIO tvar
     when (isWindowOverflow w) $ do
-        let msg = fromString ("window update for stream " ++ show sid ++ " is overflow. New window size: " <> show w <> ", from previous size: " <> show oldW)
+        let msg = fromString ("window update for stream " ++ show sid ++ " is overflow. New window size: " <> show w <> ", from previous size: " <> show oldW <> " widnow size: " <> show n)
             err =
                 if isControl sid
                     then ConnectionErrorIsSent
@@ -62,7 +62,7 @@ decreaseWindowSize Context{txFlow} Stream{streamTxFlow} siz = do
     dec txFlow
     dec streamTxFlow
   where
-    dec tvar = atomically $ modifyTVar' tvar $ \flow -> flow{txfSent = txfSent flow + siz}
+    dec tvar = atomically $ modifyTVar' tvar $ \flow -> flow{txfSent = txfSent flow - siz}
 
 ----------------------------------------------------------------
 -- Sending window update
@@ -70,13 +70,16 @@ decreaseWindowSize Context{txFlow} Stream{streamTxFlow} siz = do
 informWindowUpdate :: Context -> Stream -> Int -> IO ()
 informWindowUpdate _ _ 0 = return ()
 informWindowUpdate Context{controlQ, rxFlow} Stream{streamNumber, streamRxFlow} len = do
+    flow <- readIORef rxFlow
     mxc <- atomicModifyIORef' rxFlow $ maybeOpenRxWindow len FCTWindowUpdate
+    putStrLn $ "\n --- rxFlow: " <> show flow <> " is now " <> show mxc
     forM_ mxc $ \ws -> do
         putStrLn $ "\n ------------ new window size for rx: " <> show ws
         let frame = windowUpdateFrame 0 ws
             cframe = CFrames Nothing [frame]
         enqueueControl controlQ cframe
     mxs <- atomicModifyIORef' streamRxFlow $ maybeOpenRxWindow len FCTWindowUpdate
+    putStrLn $ "\n --- rxFlow: " <> show flow <> " is now " <> show mxs
     forM_ mxs $ \ws -> do
         putStrLn $ "\n ------------ new window size for stream rx: " <> show ws
         let frame = windowUpdateFrame streamNumber ws
