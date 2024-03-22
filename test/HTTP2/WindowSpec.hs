@@ -35,8 +35,11 @@ data Trace = Trace {traceStart :: RxFlow, traceSteps :: [(Step OpWithResult, RxF
 
 -- arbitrary instances
 
+maxWindowSize :: Int
+maxWindowSize = 2_000_000
+
 instance Arbitrary RxFlow where
-  arbitrary = newRxFlow <$> chooseInt (1, 2_000_000)
+  arbitrary = newRxFlow <$> chooseInt (1, maxWindowSize)
 
 instance Arbitrary Op where
   arbitrary = elements [minBound ..]
@@ -44,7 +47,7 @@ instance Arbitrary Op where
 instance Arbitrary Trace where
   arbitrary = do
     initialFlow <- arbitrary
-    len <- chooseInt (0, 5) -- TODO: what about longer traces?
+    len <- chooseInt (0, 100)
     Trace initialFlow <$> runManySteps len initialFlow
     where
       runManySteps :: Int -> RxFlow -> Gen [(Step OpWithResult, RxFlow)]
@@ -59,7 +62,8 @@ instance Arbitrary Trace where
       genStep oldFlow = oneof [mkConsume, mkReceive]
         where
           mkReceive =
-            Step Receive <$> chooseInt (1, rxfWindow oldFlow)
+            -- TODO: are frame sizes > window size legal?
+            Step Receive <$> chooseInt (1, rxfWindow oldFlow * 2)
 
           mkConsume =
             let recv = rxfReceived oldFlow
