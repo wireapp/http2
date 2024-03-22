@@ -8,10 +8,10 @@
 module HTTP2.WindowSpec where
 
 -- TODO: instead of consumed, received, don't we want received - consumed?  (to avoid overflows on long-living streams)
+-- TODO: shouldn't limit also shrink if buffer fill level goes down enough?
 
 import Data.List
 import Network.Control
-import Test.HUnit
 import Test.Hspec
 import Test.Hspec.QuickCheck
 import Test.QuickCheck
@@ -30,7 +30,10 @@ data OpWithResult = ConsumeWithResult (Maybe Int) | ReceiveWithResult Bool
 data Step op = Step {stepOp :: op, stepArg :: Int}
   deriving (Eq, Show)
 
-data Trace = Trace {traceStart :: RxFlow, traceSteps :: [(Step OpWithResult, RxFlow)]}
+data Trace = Trace
+  { traceStart :: RxFlow,
+    traceSteps :: [(Int, Step OpWithResult, RxFlow)]
+  }
   deriving (Eq, Show)
 
 -- arbitrary instances
@@ -47,14 +50,14 @@ instance Arbitrary Op where
 instance Arbitrary Trace where
   arbitrary = do
     initialFlow <- arbitrary
-    len <- chooseInt (0, 100)
-    Trace initialFlow <$> runManySteps len initialFlow
+    len <- chooseInt (0, 500)
+    Trace initialFlow <$> runManySteps len 0 initialFlow
     where
-      runManySteps :: Int -> RxFlow -> Gen [(Step OpWithResult, RxFlow)]
-      runManySteps 0 _ = pure []
-      runManySteps len oldFlow = do
-        step@(_, newFlow) <- runStep oldFlow <$> genStep oldFlow
-        (step :) <$> runManySteps (len - 1) newFlow
+      runManySteps :: Int -> Int -> RxFlow -> Gen [(Int, Step OpWithResult, RxFlow)]
+      runManySteps 0 _ _ = pure []
+      runManySteps len ix oldFlow | len > 0 = do
+        (newStep, newFlow) <- runStep oldFlow <$> genStep oldFlow
+        ((ix, newStep, newFlow) :) <$> runManySteps (len - 1) (ix + 1) newFlow
 
       -- TODO: extend genStep: what happens if we consume or receive 0 or negative numbers?
       -- what if frame size > window size?
@@ -95,54 +98,57 @@ instance Arbitrary Trace where
 
        -- instead, we look at the last step and all prefixes of a failing sample.
     -}
-    trunc trace : (Trace initialFlow <$> init (inits steps))
+    trunc trace <> (Trace initialFlow <$> init (inits steps))
     where
-      trunc :: Trace -> Trace
-      trunc keep@(Trace _ stp) = case reverse stp of
-        [] -> keep
-        [_] -> keep
-        ((lastStep, lastFlow) : (_, initFlow) : _) -> Trace initFlow [(lastStep, lastFlow)]
+      trunc :: Trace -> [Trace]
+      trunc (Trace _ stp) = case reverse stp of
+        [] -> []
+        [_] -> []
+        ((ix, lastStep, lastFlow) : (_, _, initFlow) : _) -> [Trace initFlow [(ix, lastStep, lastFlow)]]
 
 -- invariants
 
--- TODO: make it obvious which RxFlow (in which step) is violating an expectation.  something with an index, maybe?
--- TODO: use ppShow and counterexample again.  doesn't matter if it's redundant.
+assertTrace :: Trace -> Property
+assertTrace (Trace initialFlow steps) = assertStep initialFlow steps
 
-assertTrace :: Trace -> Assertion
-assertTrace (Trace initialFlow steps) = assertStep initialFlow `mapM_` steps
+assertStep :: RxFlow -> [(Int, Step OpWithResult, RxFlow)] -> Property
+assertStep _ [] = property True
+assertStep oldFlow ((ix, step, newFlow) : steps) =
+  (counterexample ("step #" <> show ix) check) .&. assertStep newFlow steps
   where
-    assertStep :: RxFlow -> (Step OpWithResult, RxFlow) -> Assertion
-    assertStep oldFlow (step, newFlow) = do
-      case step of
-        Step (ConsumeWithResult limitDelta) arg -> do
-          newFlow
-            `shouldBe` RxFlow
-              { rxfWindow = rxfWindow newFlow,
-                rxfConsumed = rxfConsumed oldFlow + arg,
-                rxfReceived = rxfReceived oldFlow,
-                rxfLimit =
-                  if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
-                    then rxfConsumed oldFlow + arg + rxfWindow oldFlow
-                    else rxfLimit oldFlow
-              }
-          limitDelta
-            `shouldBe` if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
-              then Just (rxfLimit newFlow - rxfLimit oldFlow)
-              else Nothing
-        Step (ReceiveWithResult isAcceptable) arg -> do
-          newFlow
-            `shouldBe` if isAcceptable
-              then
-                RxFlow
-                  { rxfWindow = rxfWindow newFlow,
-                    rxfConsumed = rxfConsumed oldFlow,
-                    rxfReceived = rxfReceived oldFlow + arg,
-                    rxfLimit = rxfLimit oldFlow
-                  }
-              else oldFlow
+    check :: Expectation
+    check = case step of
+      Step (ConsumeWithResult limitDelta) arg -> do
+        newFlow
+          `shouldBe` RxFlow
+            { rxfWindow = rxfWindow newFlow,
+              rxfConsumed = rxfConsumed oldFlow + arg,
+              rxfReceived = rxfReceived oldFlow,
+              rxfLimit =
+                if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
+                  then rxfConsumed oldFlow + arg + rxfWindow oldFlow
+                  else rxfLimit oldFlow
+            }
+        limitDelta
+          `shouldBe` if rxfLimit oldFlow - rxfReceived oldFlow < rxfWindow oldFlow `div` 2 -- TODO: can we make more sense of this?
+            then Just (rxfLimit newFlow - rxfLimit oldFlow)
+            else Nothing
+      Step (ReceiveWithResult isAcceptable) arg -> do
+        newFlow
+          `shouldBe` if isAcceptable
+            then
+              RxFlow
+                { rxfWindow = rxfWindow newFlow,
+                  rxfConsumed = rxfConsumed oldFlow,
+                  rxfReceived = rxfReceived oldFlow + arg,
+                  rxfLimit = rxfLimit oldFlow
+                }
+            else oldFlow
 
 spec :: Spec
 spec = do
-  fprop "state transition graph checks out" assertTrace
+  focus . prop "state transition graph checks out" $
+    \trace -> counterexample (ppShow trace) (assertTrace trace)
 
--- cd ~/src/http2 ; cabal test spec --test-options='--seed 1637938524 -f checks'
+-- cd ~/src/http2 ; cabal test spec --test-options='--seed 1637938524 --test-show-details=always'
+-- cd ~/src/http2 ; cabal test spec --test-show-details=always --test-options='--color'
