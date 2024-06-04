@@ -8,7 +8,7 @@ module Network.HTTP2.H2.Sender (
 ) where
 
 import Control.Concurrent.MVar (putMVar)
-import Data.IORef (modifyIORef', readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
 import Data.IntMap.Strict (IntMap)
 import Foreign.Ptr (minusPtr, plusPtr)
 import Network.ByteOrder
@@ -53,14 +53,11 @@ wrapException se
 -- Adjusting initial window size for streams
 updatePeerSettings :: Context -> SettingsList -> IO ()
 updatePeerSettings Context{peerSettings, oddStreamTable, evenStreamTable} peerAlist = do
-    oldws <- initialWindowSize <$> readIORef peerSettings
-    modifyIORef' peerSettings $ \old -> fromSettingsList old peerAlist
-    newws <- initialWindowSize <$> readIORef peerSettings
-    -- FIXME: race condition
-    -- 1) newOddStream reads old peerSettings and
-    --    insert it to its stream table after adjusting.
-    -- 2) newOddStream reads new peerSettings and
-    --    insert it to its stream table before adjusting.
+    (newws, oldws) <- atomicModifyIORef' peerSettings $ \old ->
+        let oldsize = initialWindowSize old
+            new = fromSettingsList old peerAlist
+            newsize = initialWindowSize new
+         in (new, (newsize, oldsize))
     let dif = newws - oldws
     when (dif /= 0) $ do
         getOddStreams oddStreamTable >>= updateAllStreamTxFlow dif
@@ -294,7 +291,7 @@ frameSender
           where
             eos = if endOfStream then setEndStream else id
             getFlag [] = eos $ setEndHeader defaultFlags
-            getFlag _ = eos $ defaultFlags
+            getFlag _ = eos defaultFlags
 
             continue :: Offset -> TokenHeaderList -> FrameType -> IO Offset
             continue off [] _ = return off
