@@ -73,7 +73,7 @@ updatePeerSettings Context{peerSettings, oddStreamTable, evenStreamTable} peerAl
         getEvenStreams evenStreamTable >>= updateAllStreamTxFlow dif
   where
     updateAllStreamTxFlow :: WindowSize -> IntMap Stream -> IO ()
-    updateAllStreamTxFlow siz strms =
+    updateAllStreamTxFlow siz strms = atomically $ do
         forM_ strms $ \strm -> increaseStreamWindowSize strm siz
 
 frameSender :: Context -> Config -> Manager -> IO ()

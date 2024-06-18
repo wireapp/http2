@@ -4,11 +4,10 @@ module Network.HTTP2.H2.Window where
 
 import Data.IORef
 import Network.Control
-import qualified UnliftIO.Exception as E
 import UnliftIO.STM
 
+import Control.Concurrent.STM (throwSTM)
 import Debug.Trace (traceM, traceShowId)
-import GHC.Stack.CCS (currentCallStack, renderStack)
 import Imports
 import Network.HTTP2.Frame
 import Network.HTTP2.H2.Context
@@ -37,40 +36,24 @@ waitConnectionWindowSize Context{txFlow} = do
 ----------------------------------------------------------------
 -- Receiving window update
 
-increaseWindowSize :: StreamId -> TVar TxFlow -> WindowSize -> IO ()
+increaseWindowSize :: StreamId -> TVar TxFlow -> WindowSize -> STM ()
 increaseWindowSize sid tvar n = do
-    tx <- atomically $ stateTVar tvar $ \flow -> let newFlow = flow{txfLimit = txfLimit flow + n} in (newFlow, newFlow)
+    tx <- stateTVar tvar $ \flow -> let newFlow = flow{txfLimit = txfLimit flow + n} in (newFlow, newFlow)
     let w = txWindowSize tx
-    {-
-     A sender MUST NOT allow a flow-control window to exceed 2^31-1 octets. If a sender receives a WINDOW_UPDATE
-     that causes a flow-control window to exceed this maximum, it MUST terminate either the stream or the connection,
-     as appropriate. For streams, the sender sends a RST_STREAM with an error code of FLOW_CONTROL_ERROR; for the
-     connection, a GOAWAY frame with an error code of FLOW_CONTROL_ERROR is sent.
-     -}
-    ccs <- currentCallStack
-    traceM $
-        unlines
-            [ "increased window size by: " <> show n
-            , "current window size: " <> show w
-            , "current limit: " <> show (txfLimit tx)
-            , "current sent: " <> show (txfSent tx)
-            , "stream id: " <> show sid
-            , "call stack: " <> renderStack ccs
-            , "window is" <> (if isWindowOverflow w then " " else " not ") <> "overflown"
-            ]
+
     when (isWindowOverflow w) $ do
         let msg = fromString ("window update for stream " ++ show sid ++ " is overflow")
             err =
                 if isControl sid
                     then ConnectionErrorIsSent
                     else StreamErrorIsSent
-        E.throwIO $ err FlowControlError sid msg
+        throwSTM $ err FlowControlError sid msg
 
-increaseStreamWindowSize :: Stream -> WindowSize -> IO ()
+increaseStreamWindowSize :: Stream -> WindowSize -> STM ()
 increaseStreamWindowSize Stream{streamNumber, streamTxFlow} n =
     increaseWindowSize streamNumber streamTxFlow n
 
-increaseConnectionWindowSize :: Context -> Int -> IO ()
+increaseConnectionWindowSize :: Context -> Int -> STM ()
 increaseConnectionWindowSize Context{txFlow} n =
     increaseWindowSize 0 txFlow n
 

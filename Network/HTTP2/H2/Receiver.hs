@@ -345,7 +345,7 @@ control sid FrameWindowUpdate header bs ctx = do
             [ "receiver got a window update frame of size " <> show n
             , "stream id " <> show sid
             ]
-    increaseConnectionWindowSize ctx n
+    atomically $ increaseConnectionWindowSize ctx n
 control _ _ _ _ _ =
     -- must not reach here
     return ()
@@ -552,7 +552,7 @@ stream FrameContinuation FrameHeader{flags, streamId} frag ctx s@(Open hcl (Cont
 -- (No state transition)
 stream FrameWindowUpdate header bs _ s strm = do
     WindowUpdateFrame n <- guardIt $ decodeWindowUpdateFrame header bs
-    increaseStreamWindowSize strm n
+    atomically $ increaseStreamWindowSize strm n
     return s
 
 -- Transition (stream6)
