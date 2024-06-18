@@ -2,6 +2,7 @@ module Network.HTTP2.H2.EncodeFrame where
 
 import Network.HTTP2.Frame
 
+import Debug.Trace (trace)
 import Imports
 
 ----------------------------------------------------------------
@@ -29,6 +30,18 @@ pingFrame bs = encodeFrame einfo $ PingFrame bs
     einfo = encodeInfo setAck 0
 
 windowUpdateFrame :: StreamId -> WindowSize -> ByteString
-windowUpdateFrame sid winsiz = encodeFrame einfo $ WindowUpdateFrame winsiz
+windowUpdateFrame sid winsiz =
+    ( \x ->
+        trace
+            ( "window update frame for sid "
+                <> show sid
+                <> " of size "
+                <> show winsiz
+                <> ": "
+                <> show x
+            )
+            x
+    )
+        (encodeFrame einfo $ WindowUpdateFrame winsiz)
   where
     einfo = encodeInfo id sid

@@ -1,4 +1,3 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -18,6 +17,8 @@ import UnliftIO.Concurrent
 import UnliftIO.Exception
 import UnliftIO.STM
 
+import Debug.Trace (traceM)
+import GHC.Stack.CCS
 import Imports
 import Network.HTTP2.Frame
 import Network.HTTP2.H2
@@ -224,6 +225,8 @@ sendStreaming Context{..} mgr req sid newstrm strmbdy = do
 
 exchangeSettings :: Context -> IO ()
 exchangeSettings Context{..} = do
+    stck <- currentCallStack
+    traceM ("client: exchanging settings" <> renderStack stck)
     connRxWS <- rxfBufSize <$> readIORef rxFlow
     let frames = makeNegotiationFrames mySettings connRxWS
         setframe = CFrames Nothing (connectionPreface : frames)

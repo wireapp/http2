@@ -18,6 +18,7 @@ import UnliftIO.Concurrent
 import qualified UnliftIO.Exception as E
 import UnliftIO.STM
 
+import Debug.Trace (traceM, traceShowId)
 import Imports hiding (delete, insert)
 import Network.HTTP2.Frame
 import Network.HTTP2.H2.Context
@@ -68,7 +69,7 @@ frameReceiver ctx@Context{..} conf@Config{..} = loop 0 `E.catch` sendGoaway
     sendGoaway se
         | Just e@ConnectionIsClosed <- E.fromException se =
             enqueueControl controlQ $ CFinish e
-        | Just e@(ConnectionErrorIsReceived _ _ _) <- E.fromException se =
+        | Just e@(ConnectionErrorIsReceived{}) <- E.fromException se =
             enqueueControl controlQ $ CFinish e
         | Just e@(ConnectionErrorIsSent err sid msg) <- E.fromException se = do
             let frame = goawayFrame sid err $ Short.fromShort msg
@@ -133,7 +134,7 @@ controlOrStream :: Context -> Config -> FrameType -> FrameHeader -> IO ()
 controlOrStream ctx@Context{..} Config{..} ftyp header@FrameHeader{streamId, payloadLength}
     | isControl streamId = do
         bs <- confReadN payloadLength
-        control ftyp header bs ctx
+        control streamId ftyp header bs ctx
     | ftyp == FramePushPromise = do
         bs <- confReadN payloadLength
         push header bs ctx
@@ -280,7 +281,7 @@ getOddStream ctx ftyp streamId Nothing
                     let errmsg =
                             Short.toShort
                                 ( "this frame is not allowed in an idle stream: "
-                                    `BS.append` (C8.pack (show ftyp))
+                                    `BS.append` C8.pack (show ftyp)
                                 )
                     E.throwIO $ ConnectionErrorIsSent ProtocolError streamId errmsg
                 when (ftyp == FrameHeaders) $ setPeerStreamID ctx streamId
@@ -296,8 +297,8 @@ getOddStream ctx ftyp streamId Nothing
 
 type Payload = ByteString
 
-control :: FrameType -> FrameHeader -> Payload -> Context -> IO ()
-control FrameSettings header@FrameHeader{flags, streamId} bs Context{myFirstSettings, controlQ, settingsRate, mySettings, rxFlow} = do
+control :: StreamId -> FrameType -> FrameHeader -> Payload -> Context -> IO ()
+control _ FrameSettings header@FrameHeader{flags, streamId} bs Context{myFirstSettings, controlQ, settingsRate, mySettings, rxFlow} = do
     SettingsFrame peerAlist <- guardIt $ decodeSettingsFrame header bs
     traverse_ E.throwIO $ checkSettingsList peerAlist
     if testAck flags
@@ -324,7 +325,7 @@ control FrameSettings header@FrameHeader{flags, streamId} bs Context{myFirstSett
                         setframe = CFrames (Just peerAlist) (frames ++ [ack])
                     writeIORef myFirstSettings True
                     enqueueControl controlQ setframe
-control FramePing FrameHeader{flags, streamId} bs Context{mySettings, controlQ, pingRate} =
+control _ FramePing FrameHeader{flags, streamId} bs Context{mySettings, controlQ, pingRate} =
     unless (testAck flags) $ do
         rate <- getRate pingRate
         if rate > pingRateLimit mySettings
@@ -332,15 +333,20 @@ control FramePing FrameHeader{flags, streamId} bs Context{mySettings, controlQ, 
             else do
                 let frame = pingFrame bs
                 enqueueControl controlQ $ CFrames Nothing [frame]
-control FrameGoAway header bs _ = do
+control _ FrameGoAway header bs _ = do
     GoAwayFrame sid err msg <- guardIt $ decodeGoAwayFrame header bs
     if err == NoError
         then E.throwIO ConnectionIsClosed
         else E.throwIO $ ConnectionErrorIsReceived err sid $ Short.toShort msg
-control FrameWindowUpdate header bs ctx = do
+control sid FrameWindowUpdate header bs ctx = do
     WindowUpdateFrame n <- guardIt $ decodeWindowUpdateFrame header bs
+    traceM $
+        mconcat
+            [ "receiver got a window update frame of size " <> show n
+            , "stream id " <> show sid
+            ]
     increaseConnectionWindowSize ctx n
-control _ _ _ _ =
+control _ _ _ _ _ =
     -- must not reach here
     return ()
 
@@ -444,6 +450,7 @@ stream FrameHeaders header@FrameHeader{flags, streamId} bs ctx (Open _ (Body q _
             atomically $ writeTQueue q $ Right (mempty, True)
             return HalfClosedRemote
         else -- we don't support continuation here.
+
             E.throwIO $
                 ConnectionErrorIsSent
                     ProtocolError
@@ -460,7 +467,10 @@ stream
     Stream{..} = do
         DataFrame body <- guardIt $ decodeDataFrame header bs
         -- FLOW CONTROL: WINDOW_UPDATE 0: recv: rejecting if over my limit
-        okc <- atomicModifyIORef' rxFlow $ checkRxLimit payloadLength
+        traceM "stream: connection (stream 0) rxFlow"
+        okc <-
+            atomicModifyIORef' rxFlow $
+                traceShowId . checkRxLimit payloadLength . traceShowId
         unless okc $
             E.throwIO $
                 ConnectionErrorIsSent
@@ -468,7 +478,10 @@ stream
                     streamId
                     "exceeds connection flow-control limit"
         -- FLOW CONTROL: WINDOW_UPDATE: recv: rejecting if over my limit
-        oks <- atomicModifyIORef' streamRxFlow $ checkRxLimit payloadLength
+        traceM $ "stream: rxflow in streamid: " <> show streamId
+        oks <-
+            atomicModifyIORef' streamRxFlow $
+                traceShowId . checkRxLimit payloadLength . traceShowId
         unless oks $
             E.throwIO $
                 ConnectionErrorIsSent
@@ -633,6 +646,8 @@ readSource (Source inform q refBS refEOF) = do
         else do
             (bs, isEOF) <- readBS
             let len = BS.length bs
+            -- ccs <- currentCallStack
+            -- traceM (unlines ["informing with length ", show len, show ccs])
             inform len
             return (bs, isEOF)
   where

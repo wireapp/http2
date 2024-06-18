@@ -6,3 +6,6 @@ test-misc/hpack-test-case/
 test-misc/http2-frame-test-case/
 dist-newstyle
 .ghc*
+.direnv
+.pre-commit-config.yaml
+cabal.project.local

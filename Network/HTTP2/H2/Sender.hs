@@ -17,13 +17,15 @@ import Network.HTTP.Semantics.IO
 import qualified UnliftIO.Exception as E
 import UnliftIO.STM
 
+import Debug.Trace (traceM)
+import GHC.Stack.CCS (currentCallStack, renderStack)
 import Imports
 import Network.HPACK (setLimitForEncoding, toTokenHeaderTable)
 import Network.HTTP2.Frame
 import Network.HTTP2.H2.Context
 import Network.HTTP2.H2.EncodeFrame
 import Network.HTTP2.H2.HPACK
-import Network.HTTP2.H2.Manager hiding (start)
+import Network.HTTP2.H2.Manager
 import Network.HTTP2.H2.Queue
 import Network.HTTP2.H2.Settings
 import Network.HTTP2.H2.Stream
@@ -59,6 +61,13 @@ updatePeerSettings Context{peerSettings, oddStreamTable, evenStreamTable} peerAl
             newsize = initialWindowSize new
          in (new, (newsize, oldsize))
     let dif = newws - oldws
+    traceM $
+        unlines
+            [ "updating peer settings:"
+            , "old window size " <> show oldws
+            , "new window size " <> show newws
+            , "difference " <> show dif
+            ]
     when (dif /= 0) $ do
         getOddStreams oddStreamTable >>= updateAllStreamTxFlow dif
         getEvenStreams evenStreamTable >>= updateAllStreamTxFlow dif
@@ -124,6 +133,8 @@ frameSender
             putMVar mvar ()
             E.throwIO GoAwayIsSent
         control (CFrames ms xs) = do
+            ccs <- currentCallStack
+            traceM ("sending control frame: \n" <> show xs <> "\n" <> renderStack ccs)
             buf <- copyAll xs confWriteBuffer
             let off = buf `minusPtr` confWriteBuffer
             flushN off

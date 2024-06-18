@@ -26,6 +26,7 @@ import Test.Hspec
 import UnliftIO.Async
 import qualified UnliftIO.Exception as E
 
+import Control.Exception (Exception (..))
 import Network.HPACK
 import Network.HPACK.Internal
 import qualified Network.HTTP2.Client as C
@@ -47,7 +48,7 @@ spec = do
         it "handles normal cases" $
             E.bracket (forkIO runServer) killThread $ \_ -> do
                 threadDelay 10000
-                (runClient allocSimpleConfig)
+                runClient allocSimpleConfig
 
         it "should always send the connection preface first" $ do
             prefaceVar <- newEmptyMVar
@@ -69,7 +70,9 @@ spec = do
                 runAttack rapidRst `shouldThrow` connectionError "too many rst_stream"
 
 ignoreHTTP2Error :: C.HTTP2Error -> IO ()
-ignoreHTTP2Error _ = pure ()
+ignoreHTTP2Error ex = do
+    putStrLn "error --------------------------"
+    putStrLn (displayException ex)
 
 runServer :: IO ()
 runServer = runTCPServer (Just host) port runHTTP2Server
@@ -175,7 +178,7 @@ trailersMaker ctx (Just bs) = return $ NextTrailersMaker $ trailersMaker ctx'
 
 runClient :: (Socket -> BufferSize -> IO Config) -> IO ()
 runClient allocConfig =
-    runTCPClient host port $ runHTTP2Client
+    runTCPClient host port runHTTP2Client
   where
     auth = host
     cliconf = C.defaultClientConfig{C.authority = auth}
@@ -187,7 +190,8 @@ runClient allocConfig =
 
     client :: C.Client ()
     client sendRequest aux =
-        foldr1 concurrently_ $
+        foldr1
+            concurrently_
             [ client0 sendRequest aux
             , client1 sendRequest aux
             , client2 sendRequest aux
@@ -313,7 +317,7 @@ firstTrailerValue = snd . Prelude.head . fst
 
 runAttack :: (C.ClientIO -> IO ()) -> IO ()
 runAttack attack =
-    runTCPClient host port $ runHTTP2Client
+    runTCPClient host port runHTTP2Client
   where
     auth = host
     cliconf = C.defaultClientConfig{C.authority = auth}
@@ -421,13 +425,17 @@ connectionError phrase (C.ConnectionErrorIsReceived _ _ p)
     | phrase == p = True
 connectionError _ _ = False
 
+{-# NOINLINE unsafeEncodeInteger #-}
+unsafeEncodeInteger :: Int -> ByteString -> ByteString
+unsafeEncodeInteger i b = unsafePerformIO $ encodeInteger i (B.length b)
+
 hpackEncode :: [(ByteString, ByteString)] -> ByteString
 hpackEncode kvs = foldr cat "" kvs
   where
     (k, v) `cat` b =
         B.singleton 0x10
-            <> unsafePerformIO (encodeInteger 7 (B.length k))
+            <> unsafeEncodeInteger 7 k
             <> k
-            <> unsafePerformIO (encodeInteger 7 (B.length v))
+            <> unsafeEncodeInteger 7 v
             <> v
             <> b

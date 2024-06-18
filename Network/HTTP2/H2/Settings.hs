@@ -54,7 +54,7 @@ defaultSettings :: Settings
 defaultSettings =
     baseSettings
         { maxConcurrentStreams = Just defaultMaxStreams
-        , initialWindowSize = defaultMaxStreamData
+        , initialWindowSize = (2 ^ (31 :: Int)) - 1
         }
 
 ----------------------------------------------------------------
