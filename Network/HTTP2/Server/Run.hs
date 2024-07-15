@@ -1,5 +1,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Network.HTTP2.Server.Run where
@@ -51,7 +52,11 @@ run sconf@ServerConfig{numberOfWorkers} conf server = do
         let wc = fromContext ctx
         setAction mgr $ worker wc mgr server
         replicateM_ numberOfWorkers $ spawnAction mgr
-        runH2 conf ctx mgr
+        runH2 conf ctx mgr `catches` [Handler $ \(ex :: SomeException) ->
+                                    case fromException ex of
+                                      Just ConnectionIsClosed -> pure ()
+                                      _ -> throwIO ex
+                            ]
 
 ----------------------------------------------------------------
 
